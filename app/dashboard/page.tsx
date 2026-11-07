@@ -7,9 +7,13 @@ import { requireUser } from "@/lib/auth/require-user";
 
 // Cache Components (on in next.config.ts) normally expects request-time reads like the session
 // to sit inside <Suspense> so the rest of the page can prerender. Every part of this page
-// depends on who is signed in, so there is no useful static shell to prerender. Blocking
-// instead (instant = false) means requireUser() runs before any HTML is sent, and a signed-out
-// visitor gets a real HTTP redirect, not a streamed client-side one.
+// depends on who is signed in, so there is no useful static shell; `instant = false` opts out
+// of that check so requireUser() can run at the top of the page.
+//
+// Redirects: with no session cookie at all, proxy.ts answers with a real HTTP 307 before this
+// page runs. With a cookie that turns out to be invalid or expired, requireUser() redirects
+// from here. In production that redirect is an instruction inside the streamed response
+// (status 200), which the browser follows; no dashboard content is rendered either way.
 export const instant = false;
 
 export default async function DashboardPage() {

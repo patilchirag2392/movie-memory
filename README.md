@@ -4,21 +4,39 @@ Sign in with Google, save your favorite movie, and get an AI-generated fun fact 
 
 Built for a full-stack take-home exercise, with **Variant A: backend caching and correctness**.
 
+**Live demo:** https://web-production-c2ef87.up.railway.app (see [Live demo](#live-demo) for who can sign in).
+
 **Stack:** Next.js 16 (App Router, TypeScript) · React 19 · Tailwind CSS 4 · Prisma 7 · Postgres 17 · Auth.js v5 (Google) · OpenAI · zod · Vitest
 
 ---
 
 ## Contents
-1. [Setup](#setup)
-2. [Environment variables](#environment-variables)
-3. [Database and migrations](#database-and-migrations)
-4. [Accessing the database](#accessing-the-database)
-5. [Tests](#tests)
-6. [Variant choice](#variant-choice)
-7. [Architecture overview](#architecture-overview)
-8. [Key tradeoffs](#key-tradeoffs)
-9. [With two more hours](#with-two-more-hours)
-10. [AI usage](#ai-usage)
+1. [Live demo](#live-demo)
+2. [Setup](#setup)
+3. [Environment variables](#environment-variables)
+4. [Database and migrations](#database-and-migrations)
+5. [Accessing the database](#accessing-the-database)
+6. [Tests](#tests)
+7. [Variant choice](#variant-choice)
+8. [Architecture overview](#architecture-overview)
+9. [Key tradeoffs](#key-tradeoffs)
+10. [With two more hours](#with-two-more-hours)
+11. [AI usage](#ai-usage)
+
+---
+
+## Live demo
+
+**https://web-production-c2ef87.up.railway.app**, hosted on [Railway](https://railway.com): the app plus a Railway Postgres database.
+
+- **Who can sign in:** the Google consent screen is in Testing mode, so only Google accounts listed as test users can sign in. Others see Google's "access blocked" page.
+- **The first visit after a quiet period takes a few extra seconds:** Railway's free plan puts the app to sleep when idle.
+- **How it's deployed:**
+  - The service builds with Railway's default builder and starts with `npm start` on Node 22 (from `engines` in `package.json`).
+  - Before each deploy, Railway runs `npm run db:deploy` (its pre-deploy command), so migrations are applied inside Railway's private network.
+  - A healthcheck on `/` must pass before traffic switches to a new deploy.
+- **Railway settings:** these live in the service settings, not in the repo. Railway has deprecated `railway.json` config files for new services.
+- **Environment variables:** the same as below, plus `AUTH_URL` set to the public URL (see [Production mode](#production-mode)). The demo uses its own `AUTH_SECRET`, and `DATABASE_URL` points at Railway's private database host.
 
 ---
 
@@ -44,7 +62,9 @@ npm run dev                 # http://localhost:3000
 3. Copy the client ID and secret into `.env`.
 
 ### Production mode
-`npm run build && npm start` also needs `AUTH_TRUST_HOST=true` (or `AUTH_URL`). Without it, Auth.js rejects requests with `UntrustedHost`. `npm run dev` trusts localhost automatically.
+`npm run build && npm start` also needs `AUTH_TRUST_HOST=true`. Without it, Auth.js rejects requests with `UntrustedHost`; `npm run dev` trusts localhost automatically.
+
+Behind a hosting proxy (such as Railway), also set `AUTH_URL` to the public URL. Without it, Auth.js built the Google callback URL from the container's internal address (`https://localhost:8080`), and Google sign-in fails.
 
 ---
 
@@ -61,6 +81,7 @@ All of them are server-only: none uses the `NEXT_PUBLIC_` prefix, so Next.js nev
 | `OPENAI_API_KEY` | yes | Used only by `lib/openai.ts`, on the server. |
 | `OPENAI_MODEL` | no | Defaults to `gpt-4.1-mini`. |
 | `AUTH_TRUST_HOST` | production mode only | See [Production mode](#production-mode). |
+| `AUTH_URL` | when hosted behind a proxy | The public URL, e.g. the Railway domain. See [Production mode](#production-mode). |
 
 ---
 
@@ -112,7 +133,7 @@ TablePlus can also create the connection directly from the URL: when adding a co
 
 ```bash
 npm run db:up   # the tests use the Docker test database
-npm test        # 31 tests, about 2.5s
+npm test        # 37 tests, about 2.5s
 ```
 
 Tests run against a **real Postgres** test database. Burst protection depends on Postgres row locking, which a mocked Prisma can't show. Only OpenAI (a fake `generate`) and time (an injected clock) are faked. Migrations are applied automatically before the tests run.
@@ -124,6 +145,7 @@ Tests run against a **real Postgres** test database. Burst protection depends on
 | `tests/integration/fact-route.test.ts` | Authorization on the real `GET /api/fact` handler: 401 without a session, `?userId=other` ignored, 409 based on the *session* user, `Cache-Control: no-store`. |
 | `tests/integration/onboarding-action.test.ts` | Users can't *modify* other users' data: the onboarding Server Action with no session redirects and writes nothing; a `userId` field in the form is ignored, so only the session user's row changes; a saved movie is never overwritten; invalid input is rejected without writing. |
 | `tests/unit/movie-validation.test.ts` | Onboarding input rules. |
+| `tests/unit/proxy.test.ts` | `proxy.ts` sends a real 307 to `/` from `/dashboard` and `/onboarding` when there's no session cookie, ignores unrelated cookies, and lets either Auth.js cookie name through for the page to verify. |
 
 To confirm the tests actually catch bugs, I injected seven bugs one at a time:
 - an off-by-one in the 60s check;
@@ -149,7 +171,8 @@ I chose Variant A because its problems are ones I've worked on before. In Conver
 ### Request flow
 ```
 Browser ──► Next.js App Router (Node.js)
-             ├─ /                  landing page; signed in → 307 /dashboard
+             ├─ proxy.ts           /dashboard, /onboarding: no session cookie → 307 /
+             ├─ /                  landing page; signed in → /dashboard
              ├─ /onboarding        first-time only; Server Action saves the movie
              ├─ /dashboard         profile + movie (server-rendered) + <FactCard/> (client)
              ├─ /api/auth/*        Auth.js (Google OAuth, database sessions)
@@ -160,9 +183,11 @@ Browser ──► Next.js App Router (Node.js)
 ### Authentication and authorization
 - **Auth.js with the Prisma adapter and database sessions.** The cookie holds only a random session token, and every request looks it up in the `Session` table. Signing out deletes the row, so sessions can be revoked on the server.
 - **`lib/auth/require-user.ts` is the only source of a user id.** Pages call `requireUser()`, which redirects when signed out. The API route and server actions call `getSessionUserId()`. No route param, query string, form field or request body is ever read as a user id. `GET /api/fact` doesn't even accept the request object.
-- **Access checks happen next to the data, not in middleware.** Every page, server action and route handler checks the session itself. Server actions are public HTTP endpoints, so the onboarding action re-checks the session instead of trusting the page.
+- **Access checks happen next to the data.** Every page, server action and route handler checks the session itself. Server actions are public HTTP endpoints, so the onboarding action re-checks the session instead of trusting the page.
+- **`proxy.ts` is only an optimistic check.** For `/dashboard` and `/onboarding`, if there's no session cookie at all, it answers with a real HTTP 307 to `/` before the page runs. It never validates the cookie or touches the database, so it isn't a security boundary: a forged or expired cookie gets past it and is rejected by the page.
 - **First-time vs returning:** sign-in always lands on `/dashboard`, which sends users with no `favoriteMovie` to `/onboarding`. That's one rule, read from the database.
-- **Pages block instead of streaming (`export const instant = false`).** This Next version enables Cache Components, which expects request-time reads to sit behind `<Suspense>`. These pages depend entirely on who is signed in, so blocking gives a real HTTP 307 redirect before any HTML is sent. `await connection()` marks the session read as request-time work.
+- **Pages read the session at the top level (`export const instant = false`).** This Next version enables Cache Components, which expects request-time reads to sit behind `<Suspense>`. These pages depend entirely on who is signed in, so there's no useful static part to show first, and `instant = false` opts them out of that check. `await connection()` marks the session read as request-time work.
+- **How redirects arrive.** In dev, a page's `redirect()` is an HTTP 307. In production, Cache Components streams pages, so a redirect from inside a page arrives as an instruction in a 200 response, which the browser follows. That's why `proxy.ts` handles the common no-cookie case with a real 307. The page-level redirects (an invalid cookie; first-time vs returning) stay streamed. No protected content is rendered in either case; I checked the production response for `/dashboard` with a forged cookie.
 
 ### Data model (`prisma/schema.prisma`)
 - **`User.favoriteMovie String?`:** `NULL` means not onboarded yet. The spec allows one favorite per user, so a separate movie table would add a join for no benefit, and a separate `onboarded` flag could disagree with the data.
@@ -219,6 +244,7 @@ flowchart TD
 | Path | Role |
 |---|---|
 | `auth.ts`, `app/api/auth/[...nextauth]/route.ts` | Auth.js setup |
+| `proxy.ts` | optimistic no-cookie → 307 for the signed-in pages |
 | `lib/auth/require-user.ts`, `lib/auth/actions.ts` | session → user id; sign-in/out actions |
 | `app/onboarding/*`, `lib/validation/movie.ts` | onboarding page, action, validation rules |
 | `app/dashboard/page.tsx`, `components/*` | dashboard, avatar, fact card |
@@ -244,7 +270,7 @@ flowchart TD
 - **Crash recovery is bounded but not instant.** If a request dies while holding the lease, that user gets the fallback (stale fact or friendly error) for up to 20s, until the lease expires. Letting waiting requests take over would risk duplicate generations and repeated retries against a failing API.
 - **No automatic retries against OpenAI.** A failed call becomes a stale fact or an error right away, keeping total time bounded so the lease stays correct. The user can click "Get another".
 - **`GET` creates data.** `GET /api/fact` can create a fact, but within the 60s window it's effectively idempotent, and the spec names the endpoint this way. Every response has `Cache-Control: no-store`.
-- **Blocking pages instead of Suspense streaming.** Real HTTP redirects and simpler code, at the cost of the instant static shell that Cache Components could provide.
+- **Top-level session reads instead of Suspense boundaries.** Simpler pages, at the cost of the instant static shell that Cache Components could provide. In production, redirects issued by the pages themselves arrive inside the streamed response rather than as HTTP 307s. `proxy.ts` covers the common signed-out case with a real 307, using a cookie-presence check only.
 - **Auth.js v5 is still a beta** (pinned to `5.0.0-beta.32`), and the project is now in maintenance mode, since its team joined Better Auth. It was the required stack.
 - **The adapter stores Google's access and ID tokens** in `Account` even though the app never uses them.
 - **Facts are kept as an append-only history.** That satisfies "store generated facts" but grows without bound.
@@ -258,7 +284,7 @@ flowchart TD
 3. **Playwright end-to-end tests** for the sign-in → onboarding → dashboard flow, plus **CI** (GitHub Actions with a Postgres service running `npm test`).
 4. **Clear the unused Google tokens** from `Account` after sign-in.
 5. **A per-user daily cap on OpenAI calls** to bound cost, plus structured logging and metrics for cache hit rate, lease contention and OpenAI latency/errors.
-6. **Deploy** (e.g. Vercel + Neon), with `AUTH_URL` set and migrations run as a release step.
+6. **Automatic deploys from GitHub** for the Railway demo (it's currently deployed from the CLI), plus a staging environment.
 7. **Prune old facts**, keeping the last N per user.
 
 ---

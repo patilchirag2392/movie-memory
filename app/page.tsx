@@ -3,9 +3,10 @@ import { redirect } from "next/navigation";
 import { signInWithGoogle } from "@/lib/auth/actions";
 import { getSessionUserId } from "@/lib/auth/require-user";
 
-// This page reads the session at the top level, so it blocks on the server instead of
-// streaming a static shell. That lets a signed-in visitor get a real HTTP redirect before any
-// HTML is sent. See the note in app/dashboard/page.tsx.
+// This page reads the session at the top level, which Cache Components only allows when the
+// page opts out of the static-shell check (see the note in app/dashboard/page.tsx). A signed-in
+// visitor is redirected to /dashboard. In dev that is an HTTP 307; in production it arrives as
+// a redirect instruction inside the streamed response, which the browser follows.
 export const instant = false;
 
 export default async function Home() {

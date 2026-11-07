@@ -4,8 +4,9 @@ import { requireUser } from "@/lib/auth/require-user";
 
 import { OnboardingForm } from "./onboarding-form";
 
-// Blocking for the same reason as the dashboard: who you are decides whether you see this page
-// at all, so the redirect must happen before any HTML is sent.
+// Same setup as the dashboard (see the note in app/dashboard/page.tsx): who you are decides
+// whether you see this page at all. proxy.ts sends visitors with no session cookie away with a
+// 307; requireUser() below is the real check.
 export const instant = false;
 
 export default async function OnboardingPage() {
