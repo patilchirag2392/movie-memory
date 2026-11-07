@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { Avatar } from "@/components/avatar";
+import { FactCard } from "@/components/fact-card";
 import { signOutAction } from "@/lib/auth/actions";
 import { requireUser } from "@/lib/auth/require-user";
 
@@ -61,6 +62,8 @@ export default async function DashboardPage() {
         {/* Rendered as text: React escapes it, so a title like "<script>" is shown, not run. */}
         <p className="text-lg font-medium break-words">{user.favoriteMovie}</p>
       </section>
+
+      <FactCard />
     </main>
   );
 }
