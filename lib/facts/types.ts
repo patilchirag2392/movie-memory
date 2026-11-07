@@ -18,6 +18,11 @@ export type FactSource = "generated" | "cache" | "stale";
 export type FactSuccessBody = {
   fact: FactView;
   source: FactSource;
+  /**
+   * Whole seconds until "Get another" can produce a new fact (0 = now). Computed with the
+   * server's clock, so the client only has to count it down.
+   */
+  nextFactInSeconds: number;
 };
 
 export type FactErrorCode = "unauthenticated" | "not_onboarded" | "generation_failed";

@@ -36,7 +36,10 @@ export default function PrivacyPage() {
             created.
           </li>
           <li>
-            <strong>Your sign-in session:</strong> a session record, deleted when you sign out.
+            <strong>Your sign-in session:</strong> a session record. It&apos;s deleted when you sign
+            out. If you don&apos;t sign out, it expires after 30 days without use (the sign-in
+            library&apos;s default; using the app extends it at most once a day), and an expired
+            session is rejected and deleted the next time it&apos;s presented.
           </li>
         </ul>
       </section>
@@ -54,6 +57,16 @@ export default function PrivacyPage() {
             facts. Nothing is sold or shared with anyone else, and there are no ads or analytics.
           </li>
         </ul>
+      </section>
+
+      <section className="space-y-2">
+        <h2 className="text-base font-semibold">Server logs</h2>
+        <p>
+          When something goes wrong (for example, the fact service is unavailable), the server logs
+          the error. These logs may include your internal account ID, a random identifier the app
+          assigns, not your email, along with technical error details. They&apos;re kept by Railway,
+          the hosting provider, under its log retention, and are used only to fix problems.
+        </p>
       </section>
 
       <section className="space-y-2">

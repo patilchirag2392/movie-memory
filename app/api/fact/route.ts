@@ -1,8 +1,12 @@
+import { unstable_rethrow } from "next/navigation";
 import { NextResponse } from "next/server";
 
 import { getSessionUserId } from "@/lib/auth/require-user";
 import { getFactForUser } from "@/lib/facts/service";
 import type { FactErrorBody, FactErrorCode, FactSuccessBody } from "@/lib/facts/types";
+
+const UNAVAILABLE_MESSAGE =
+  "We couldn't come up with a fun fact right now. Please try again in a moment.";
 
 // GET /api/fact: a fun fact about the signed-in user's favorite movie.
 //
@@ -10,6 +14,22 @@ import type { FactErrorBody, FactErrorCode, FactSuccessBody } from "@/lib/facts/
 // client sends (e.g. ?userId=someone-else) is ignored; the only user it can act for is the one
 // whose session cookie came with the request.
 export async function GET() {
+  try {
+    return await handle();
+  } catch (err) {
+    // Next.js signals some things (e.g. "this route is dynamic" during the build) by throwing
+    // its own errors from request-time APIs like the session read. Those must reach Next.js,
+    // so they're rethrown before anything else (see Next's unstable_rethrow docs).
+    unstable_rethrow(err);
+    // Anything else is a bug or an outage (e.g. the database is unreachable). Log the details
+    // on the server and give the client the same JSON shape as any other failure, never a
+    // stack trace or an HTML error page.
+    console.error("[api/fact] unexpected error", err);
+    return error(503, "generation_failed", UNAVAILABLE_MESSAGE);
+  }
+}
+
+async function handle() {
   const userId = await getSessionUserId();
   if (!userId) return error(401, "unauthenticated", "Please sign in again.");
 
@@ -20,14 +40,14 @@ export async function GET() {
       return error(409, "not_onboarded", "Pick a favorite movie first.");
     }
     // The cause is logged on the server; the client gets a friendly message, never internals.
-    return error(
-      503,
-      "generation_failed",
-      "We couldn't come up with a fun fact right now. Please try again in a moment.",
-    );
+    return error(503, "generation_failed", UNAVAILABLE_MESSAGE);
   }
 
-  return json<FactSuccessBody>(200, { fact: result.fact, source: result.source });
+  return json<FactSuccessBody>(200, {
+    fact: result.fact,
+    source: result.source,
+    nextFactInSeconds: result.nextFactInSeconds,
+  });
 }
 
 function error(status: number, code: FactErrorCode, message: string) {

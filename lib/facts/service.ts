@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { FactGenerationError, generateMovieFact } from "@/lib/openai";
 
-import { isFresh } from "./cache";
+import { isFresh, secondsUntilNewFact } from "./cache";
 import { factRepo, type FactRepo, type StoredFact } from "./repo";
 import { LEASE_TTL_MS, LOSER_MAX_WAIT_MS, LOSER_POLL_INTERVAL_MS } from "./timing";
 import type { FactSource, FactView } from "./types";
@@ -30,7 +30,7 @@ const defaultDeps: FactDeps = {
 };
 
 export type FactResult =
-  | { ok: true; fact: FactView; source: FactSource }
+  | { ok: true; fact: FactView; source: FactSource; nextFactInSeconds: number }
   | { ok: false; reason: "not_onboarded" | "generation_failed" };
 
 /**
@@ -57,12 +57,19 @@ export async function getFactForUser(
 
   // 1. 60-second cache window.
   const latest = await deps.repo.findLatestFact(userId, movie);
-  if (latest && isFresh(latest.createdAt, requestStart)) return success(latest, "cache");
+  if (latest && isFresh(latest.createdAt, requestStart)) return success(latest, "cache", deps);
 
   // 2. Only one request per user may generate at a time.
+  // The lease's clock reading is taken now, at acquisition, not at requestStart. The two
+  // queries above take time; if leaseUntil were based on requestStart, that time would be cut
+  // from the lease's 20s, eating into the margin the timing rule relies on (deadline < TTL). A
+  // stale "now" would also misjudge whether an existing lease has expired yet.
+  // requestStart is still used for the cache check above and for the waiting requests'
+  // "created since I arrived" filter.
   const token = randomUUID();
-  const leaseUntil = new Date(requestStart.getTime() + LEASE_TTL_MS);
-  const won = await deps.repo.acquireLease(userId, token, requestStart, leaseUntil);
+  const acquiredAt = deps.now();
+  const leaseUntil = new Date(acquiredAt.getTime() + LEASE_TTL_MS);
+  const won = await deps.repo.acquireLease(userId, token, acquiredAt, leaseUntil);
 
   return won
     ? generateHoldingLease(userId, movie, token, deps)
@@ -79,7 +86,7 @@ async function generateHoldingLease(
     // Double-check: a request that held the lease just before us may have stored a fact between
     // our cache check and our acquiring the lease. Serving it avoids a second, needless call.
     const latest = await deps.repo.findLatestFact(userId, movie);
-    if (latest && isFresh(latest.createdAt, deps.now())) return success(latest, "cache");
+    if (latest && isFresh(latest.createdAt, deps.now())) return success(latest, "cache", deps);
 
     let content: string;
     try {
@@ -93,11 +100,23 @@ async function generateHoldingLease(
     // Stamped when stored (not when the request started), so the fact's 60s window starts when
     // it exists, and waiting requests (which look for createdAt >= their own start) find it.
     const fact = await deps.repo.insertFact({ userId, movie, content, createdAt: deps.now() });
-    return success(fact, "generated");
+    return success(fact, "generated", deps);
   } finally {
     // Always release, including after a failure, so the next request can retry right away
     // instead of waiting out the TTL.
-    await deps.repo.releaseLease(userId, token);
+    //
+    // A failed release must never change the outcome. An error thrown inside `finally` would
+    // replace the return value: a fact that was already stored would turn into a 503, or an
+    // OpenAI failure's stale fallback would be lost. So it's caught and logged here. Nothing is
+    // lost by ignoring it: the lease still expires on its own after LEASE_TTL_MS.
+    try {
+      await deps.repo.releaseLease(userId, token);
+    } catch (error) {
+      console.error("[facts] lease release failed; it will expire on its own", {
+        userId,
+        cause: describe(error),
+      });
+    }
   }
 }
 
@@ -120,7 +139,7 @@ async function waitForLeaseHolder(
     const leaseHeld = await deps.repo.isLeaseHeld(userId, deps.now());
 
     const fresh = await deps.repo.findFactCreatedSince(userId, movie, requestStart);
-    if (fresh) return success(fresh, "cache");
+    if (fresh) return success(fresh, "cache", deps);
 
     // The holder finished without storing a fact: its OpenAI call failed. Don't keep waiting,
     // and don't start our own call against a failing API; fall back right away.
@@ -133,14 +152,17 @@ async function waitForLeaseHolder(
 /** Latest fact for this user's CURRENT movie, any age, or the friendly error. */
 async function fallback(userId: string, movie: string, deps: FactDeps): Promise<FactResult> {
   const latest = await deps.repo.findLatestFact(userId, movie);
-  return latest ? success(latest, "stale") : { ok: false, reason: "generation_failed" };
+  return latest ? success(latest, "stale", deps) : { ok: false, reason: "generation_failed" };
 }
 
-function success(fact: StoredFact, source: FactSource): FactResult {
+function success(fact: StoredFact, source: FactSource, deps: FactDeps): FactResult {
   return {
     ok: true,
     source,
     fact: { content: fact.content, movie: fact.movie, createdAt: fact.createdAt.toISOString() },
+    // A stale fact means OpenAI just failed and the lease is released, so the user may retry
+    // right away. Otherwise the fact is fresh: a new one is possible once it turns 60s old.
+    nextFactInSeconds: source === "stale" ? 0 : secondsUntilNewFact(fact.createdAt, deps.now()),
   };
 }
 

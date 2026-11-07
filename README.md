@@ -94,7 +94,7 @@ All of them are server-only: none uses the `NEXT_PUBLIC_` prefix, so Next.js nev
 | `npm run db:migrate` | `prisma migrate dev`: for schema changes during development; creates a new migration. |
 | `npm run db:studio` | Opens Prisma Studio to browse the data. |
 
-The Postgres container listens on port **5433**, not 5432, so it doesn't collide with a Postgres already running on the host. Prisma 7 reads its connection URL from `prisma7.config.ts` (that version's default config name), not from the schema file.
+The Postgres container listens on port **5433**, not 5432, so it doesn't collide with a Postgres already running on the host. Prisma 7 reads its connection URL from a config file, not from the schema. Ours is `prisma7.config.ts`: that's what `prisma init` generated in 7.10.1, and the name this version looks for first. Prisma's docs describe `prisma.config.ts`, which 7.10.1 still accepts as a legacy name.
 
 ---
 
@@ -133,16 +133,16 @@ TablePlus can also create the connection directly from the URL: when adding a co
 
 ```bash
 npm run db:up   # the tests use the Docker test database
-npm test        # 37 tests, about 2.5s
+npm test        # 44 tests, about 3s
 ```
 
 Tests run against a **real Postgres** test database. Burst protection depends on Postgres row locking, which a mocked Prisma can't show. Only OpenAI (a fake `generate`) and time (an injected clock) are faked. Migrations are applied automatically before the tests run.
 
 | File | Covers |
 |---|---|
-| `tests/unit/cache.test.ts` | The 60s rule to the millisecond: 59.999s is cached, exactly 60s regenerates. |
-| `tests/integration/fact-service.test.ts` | Cache window end to end. Facts are scoped to the current movie. OpenAI failure: stale fact, or a friendly error, never a previous movie's fact; the lease is released. **5 concurrent requests → 1 OpenAI call and 1 stored fact.** Waiting requests don't retry against a failing API. Per-user isolation. |
-| `tests/integration/fact-route.test.ts` | Authorization on the real `GET /api/fact` handler: 401 without a session, `?userId=other` ignored, 409 based on the *session* user, `Cache-Control: no-store`. |
+| `tests/unit/cache.test.ts` | The 60s rule to the millisecond: 59.999s is cached, exactly 60s regenerates. The "Get another" countdown rounds up, so it reaches 0 exactly when the fact stops being fresh. |
+| `tests/integration/fact-service.test.ts` | Cache window end to end. Facts are scoped to the current movie. OpenAI failure: stale fact, or a friendly error, never a previous movie's fact; the lease is released. **5 concurrent requests → 1 OpenAI call and 1 stored fact.** Waiting requests don't retry against a failing API. A failed lease release can't change the result. Lease times come from the clock at acquisition. Per-user isolation. |
+| `tests/integration/fact-route.test.ts` | Authorization on the real `GET /api/fact` handler: 401 without a session, `?userId=other` ignored, 409 based on the *session* user, `Cache-Control: no-store`. Unexpected errors (a bug, or a failed session lookup) return the standard 503 JSON without leaking details. |
 | `tests/integration/onboarding-action.test.ts` | Users can't *modify* other users' data: the onboarding Server Action with no session redirects and writes nothing; a `userId` field in the form is ignored, so only the session user's row changes; a saved movie is never overwritten; invalid input is rejected without writing. |
 | `tests/unit/movie-validation.test.ts` | Onboarding input rules. |
 | `tests/unit/proxy.test.ts` | `proxy.ts` sends a real 307 to `/` from `/dashboard` and `/onboarding` when there's no session cookie, ignores unrelated cookies, and lets either Auth.js cookie name through for the page to verify. |
@@ -181,23 +181,21 @@ Browser ──► Next.js App Router (Node.js)
 ```
 
 ### Authentication and authorization
-- **Auth.js with the Prisma adapter and database sessions.** The cookie holds only a random session token, and every request looks it up in the `Session` table. Signing out deletes the row, so sessions can be revoked on the server.
-- **`lib/auth/require-user.ts` is the only source of a user id.** Pages call `requireUser()`, which redirects when signed out. The API route and server actions call `getSessionUserId()`. No route param, query string, form field or request body is ever read as a user id. `GET /api/fact` doesn't even accept the request object.
-- **Access checks happen next to the data.** Every page, server action and route handler checks the session itself. Server actions are public HTTP endpoints, so the onboarding action re-checks the session instead of trusting the page.
-- **`proxy.ts` is only an optimistic check.** For `/dashboard` and `/onboarding`, if there's no session cookie at all, it answers with a real HTTP 307 to `/` before the page runs. It never validates the cookie or touches the database, so it isn't a security boundary: a forged or expired cookie gets past it and is rejected by the page.
-- **First-time vs returning:** sign-in always lands on `/dashboard`, which sends users with no `favoriteMovie` to `/onboarding`. That's one rule, read from the database.
-- **Pages read the session at the top level (`export const instant = false`).** This Next version enables Cache Components, which expects request-time reads to sit behind `<Suspense>`. These pages depend entirely on who is signed in, so there's no useful static part to show first, and `instant = false` opts them out of that check. `await connection()` marks the session read as request-time work.
-- **How redirects arrive.** In dev, a page's `redirect()` is an HTTP 307. In production, Cache Components streams pages, so a redirect from inside a page arrives as an instruction in a 200 response, which the browser follows. That's why `proxy.ts` handles the common no-cookie case with a real 307. The page-level redirects (an invalid cookie; first-time vs returning) stay streamed. No protected content is rendered in either case; I checked the production response for `/dashboard` with a forged cookie.
+- **Database sessions** (Auth.js + Prisma adapter). The cookie holds an opaque token that's looked up in `Session` on every request; signing out deletes the row, so sessions are revocable.
+- **One source of user ids:** `lib/auth/require-user.ts`. Pages call `requireUser()`; the API route and server actions call `getSessionUserId()`. No param, query string, form field or body is ever read as a user id, and `GET /api/fact` doesn't even accept the request.
+- **Checks sit next to the data.** Every page, server action and route handler verifies the session itself. `proxy.ts` only sends a real 307 when there's no session cookie at all. It never validates the cookie, so a forged one gets past it and is rejected by the page.
+- **First-time vs returning** is one rule: sign-in lands on `/dashboard`, which sends users whose `favoriteMovie` is `NULL` to `/onboarding`.
+- **Next 16 specifics:**
+  - Pages read the session at the top level. `instant = false` opts them out of Cache Components' static-shell check, and `await connection()` marks the read as request-time work.
+  - In production, a `redirect()` from inside a page arrives in a streamed 200 rather than as a 307. That's why the proxy handles the common signed-out case.
 
 ### Data model (`prisma/schema.prisma`)
-- **`User.favoriteMovie String?`:** `NULL` means not onboarded yet. The spec allows one favorite per user, so a separate movie table would add a join for no benefit, and a separate `onboarded` flag could disagree with the data.
-- **`Fact { userId, movie, content, createdAt }`**, indexed on `(userId, movie, createdAt DESC)`:
-  - `movie` is a copy of the title at the time the fact was made, so lookups filter on the user's *current* title and a fact about an earlier movie can never be served.
-  - `createdAt` has **no database default**. The app sets it from one injected clock, and Prisma's types make it a required field.
-  - The index matches the one hot query exactly ("newest fact for this user and movie").
-- **`User.factLockToken` / `factLockUntil`:** the generation lease (below).
-- Auth.js `Account` and `Session` tables. `VerificationToken` and `Authenticator` are left out because email and passkey sign-in aren't used.
-- All timestamps are `timestamptz`, and every foreign key deletes in cascade with its user.
+- **`User.favoriteMovie String?`:** `NULL` means not onboarded. It's the one source of truth, with no separate flag or movie table to drift out of sync.
+- **`Fact { userId, movie, content, createdAt }`,** indexed on `(userId, movie, createdAt DESC)`, which matches the only hot query.
+  - `movie` is a copy of the title, so facts are matched to the user's *current* movie.
+  - `createdAt` has no database default, so the app's single clock sets it, and Prisma's types make it required.
+- **`User.factLockToken` / `factLockUntil`:** the generation lease.
+- **Auth.js tables:** only `Account` and `Session`, since email and passkey sign-in aren't used. Timestamps are `timestamptz`; deletes cascade from `User`.
 
 ### Fact generation (`lib/facts/`)
 ```mermaid
@@ -221,39 +219,38 @@ flowchart TD
   F -- no --> E503[503 friendly message]
 ```
 
-- **60-second cache:** `isFresh(createdAt, now)` is a pure function: `now - createdAt < 60s`.
-- **Burst protection (generation lease):**
-  - A request takes the lease with one statement: `UPDATE "User" SET token, until WHERE id = $1 AND (factLockUntil IS NULL OR factLockUntil < now)`. I confirmed with query logging that Prisma's `updateMany` sends exactly this. Postgres locks the row for the first such update; the others re-check the condition against the updated row and match nothing. Exactly one request wins, across any number of server instances, with **no transaction held open during the OpenAI call**.
-  - The winner re-checks the cache, generates, stores the fact, and releases the lease in a `finally`. The release only succeeds if the stored token still matches, so a request whose lease expired can't clear a newer holder's lease.
-  - Losers poll for the winner's fact. They read the lease *before* looking for the fact: the winner stores before releasing, so a free lease plus no fact really means the winner failed, and the loser falls back immediately instead of calling a failing API again.
-- **Timing rule:** OpenAI deadline 10s < loser max wait 12s < lease lifetime 20s, checked when the module loads (`lib/facts/timing.ts`). The OpenAI client uses `maxRetries: 0` and a single `AbortSignal.timeout(10s)`. The SDK's own timeout applies to each retry attempt, so retries could have pushed a request past the lease's lifetime, letting a second request start a duplicate generation.
-- **Failure handling:** if OpenAI fails, the response is the latest fact for **this user and their current movie**, marked `stale`. Otherwise it's a 503 with a friendly message. The real cause is logged on the server only.
-- **Safe OpenAI use:**
-  - `lib/openai.ts` imports `server-only`, so importing it from browser code fails the build.
-  - The title is sent as the user message, and the instructions say to treat it purely as a title and not to invent facts.
-  - The output is capped, and empty or overlong replies count as failures.
-  - Facts are rendered as plain text, which React escapes.
-- **Testability:** the service takes its repository, `generate` function, clock and `sleep` as parameters.
+- **Cache:** `isFresh` is `now - createdAt < 60s`, so exactly 60s regenerates.
+- **Lease:** one atomic `UPDATE "User" SET token, until WHERE id = $1 AND (lockUntil IS NULL OR lockUntil < now)`, confirmed with query logging. Postgres row locking lets exactly one concurrent request match, across server instances, without holding a transaction open during the OpenAI call.
+  - **The winner** re-checks the cache, generates, stores, and releases in `finally`. The release is matched by token, and a failed release can't change the result.
+  - **Losers** poll for the winner's fact. They check the lease *before* the fact, because the winner stores before releasing: a free lease with no fact means the winner failed, so they fall back instead of calling OpenAI again.
+- **Timing rule:** OpenAI deadline 10s (`maxRetries: 0` plus one `AbortSignal`) < loser wait 12s < lease lifetime 20s, checked at startup. Lease times come from the clock at the moment of acquisition.
+- **Failures:**
+  - OpenAI fails → the latest fact for this user's **current** movie (`stale`), otherwise a friendly 503.
+  - An unexpected error in the route → the same 503 JSON.
+  - A page that fails to render → `app/error.tsx` (or `global-error.tsx`), showing a reference ID that matches the server log.
+- **OpenAI safety:**
+  - The module is server-only.
+  - The title is sent as user input and never as instructions.
+  - Output is capped; empty or overlong replies are rejected.
+  - Facts are rendered as escaped text.
+- **Testability:** the repo, `generate`, clock and `sleep` are injected.
 
 ### Frontend
-- The dashboard is server-rendered; the fact card (`components/fact-card.tsx`) loads `/api/fact` after render, so a slow OpenAI call never delays the page.
-- The card ignores responses from requests it has replaced, so an older, slower response can't overwrite a newer one. It explains cached and stale facts to the user.
-- `components/avatar.tsx` shows initials when the Google photo is missing or fails to load. The name and email have fallbacks too ("No name shared by Google").
+- The dashboard is server-rendered. The fact card loads after render and ignores responses from requests it has replaced.
+- **"Get another"** is disabled while showing "New fact in 42s", counting down `nextFactInSeconds`. The server computes that number with its own clock and the browser only counts it down, so a wrong client clock can't skew it.
+- **Messages:** cached and stale facts get a short note; any non-200 shows a friendly message, plus a sign-in link on a 401.
+- **Fallbacks:** the avatar shows initials when there's no photo, and the name and email have fallbacks too.
 
 ### File map
 | Path | Role |
 |---|---|
-| `auth.ts`, `app/api/auth/[...nextauth]/route.ts` | Auth.js setup |
-| `proxy.ts` | optimistic no-cookie → 307 for the signed-in pages |
-| `lib/auth/require-user.ts`, `lib/auth/actions.ts` | session → user id; sign-in/out actions |
-| `app/onboarding/*`, `lib/validation/movie.ts` | onboarding page, action, validation rules |
+| `auth.ts`, `lib/auth/*`, `proxy.ts` | Auth.js setup, session → user id, sign-in/out, signed-out 307s |
+| `app/onboarding/*`, `lib/validation/movie.ts` | onboarding page, Server Action, validation rules |
 | `app/dashboard/page.tsx`, `components/*` | dashboard, avatar, fact card |
-| `app/privacy/page.tsx` | privacy policy (Google requires one before the OAuth app can be published for any Google account) |
+| `app/error.tsx`, `app/global-error.tsx`, `app/privacy/page.tsx` | error screens; privacy policy (required by Google to publish the OAuth app) |
 | `app/api/fact/route.ts` | HTTP contract: 200/401/409/503, `no-store` |
-| `lib/facts/service.ts` | cache → lease → generate → fallback |
-| `lib/facts/repo.ts` | every fact query, all filtered by `userId` |
-| `lib/facts/cache.ts`, `lib/facts/timing.ts` | 60s rule; timing constants and their ordering check |
-| `lib/openai.ts` | the only file that calls OpenAI (server-only) |
+| `lib/facts/service.ts`, `repo.ts` | cache → lease → generate → fallback; every query filtered by `userId` |
+| `lib/facts/cache.ts`, `timing.ts`, `lib/openai.ts` | 60s rule and countdown; timing constants; the only OpenAI caller |
 | `lib/db.ts`, `prisma/` | Prisma client, schema, migrations |
 
 ---
@@ -268,6 +265,7 @@ flowchart TD
 - **Lease columns on `User` instead of a separate lock table.** Each user already has exactly one row, so taking the lease is a single `updateMany` with no raw SQL and no race to create the lock row. The cost is that a concurrency mechanism sits next to profile data.
 - **One app clock.** Every timestamp the logic compares comes from the app server's clock, which makes the 60s boundary exact and testable. It assumes app servers have synchronized clocks (NTP). The alternative is using Postgres `now()` as the single clock via raw SQL, at the cost of an injectable clock in tests.
 - **Losers poll instead of being notified.** A waiting request makes up to two small queries every 500ms for at most 12s. Postgres `LISTEN/NOTIFY` would avoid polling, but adds connection management that isn't worth it at this scale.
+- **A database outage looks like being signed out.** Auth.js treats a failed session lookup as "no session", so during an outage the protected pages send users to the landing page, and signing in fails on Auth.js's own error page. Nothing leaks, but users see "Sign in" rather than an outage message. `app/error.tsx` covers failures after the session check.
 - **Crash recovery is bounded but not instant.** If a request dies while holding the lease, that user gets the fallback (stale fact or friendly error) for up to 20s, until the lease expires. Letting waiting requests take over would risk duplicate generations and repeated retries against a failing API.
 - **No automatic retries against OpenAI.** A failed call becomes a stale fact or an error right away, keeping total time bounded so the lease stays correct. The user can click "Get another".
 - **`GET` creates data.** `GET /api/fact` can create a fact, but within the 60s window it's effectively idempotent, and the spec names the endpoint this way. Every response has `Cache-Control: no-store`.

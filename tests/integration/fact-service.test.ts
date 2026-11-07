@@ -47,12 +47,15 @@ describe("60-second cache window", () => {
     const { deps, generate, setClock } = makeDeps();
 
     const first = await getFactForUser("u1", deps);
-    expect(first).toMatchObject({ ok: true, source: "generated" });
+    expect(first).toMatchObject({ ok: true, source: "generated", nextFactInSeconds: 60 });
     expect(generate).toHaveBeenCalledTimes(1);
+
+    setClock(at(45_000));
+    expect(await getFactForUser("u1", deps)).toMatchObject({ source: "cache", nextFactInSeconds: 15 });
 
     setClock(at(59_999)); // just inside the window
     const cached = await getFactForUser("u1", deps);
-    expect(cached).toMatchObject({ ok: true, source: "cache" });
+    expect(cached).toMatchObject({ ok: true, source: "cache", nextFactInSeconds: 1 });
     expect(cached.ok && first.ok && cached.fact.content).toBe(first.ok && first.fact.content);
     expect(generate).toHaveBeenCalledTimes(1); // no OpenAI call for a cache hit
 
@@ -106,6 +109,7 @@ describe("OpenAI failure handling", () => {
       ok: true,
       source: "stale",
       fact: { content: "Newest Alien fact", movie: "Alien" },
+      nextFactInSeconds: 0, // OpenAI just failed and the lease is free: retrying now is allowed
     });
   });
 
@@ -143,6 +147,21 @@ describe("OpenAI failure handling", () => {
     await expect(getFactForUser("u1", deps)).rejects.toThrow(TypeError);
     const user = await db.user.findUniqueOrThrow({ where: { id: "u1" } });
     expect(user.factLockToken).toBeNull();
+  });
+
+  it("a failed lease release after a successful insert still returns the generated fact", async () => {
+    await createUser("u1", "The Matrix");
+    const releaseLease = vi.fn(async () => {
+      throw new Error("connection lost");
+    });
+    const { deps, generate } = makeDeps({ repo: { ...factRepo, releaseLease } });
+
+    const result = await getFactForUser("u1", deps);
+
+    expect(result).toMatchObject({ ok: true, source: "generated", fact: { movie: "The Matrix" } });
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(releaseLease).toHaveBeenCalledTimes(1); // it was attempted, and its failure was swallowed
+    expect(await factCount("u1")).toBe(1); // the fact really was stored
   });
 });
 
@@ -202,6 +221,32 @@ describe("burst protection (concurrent requests, real Postgres)", () => {
     for (const r of results) {
       expect(r).toMatchObject({ ok: true, source: "stale", fact: { content: "Old Alien fact" } });
     }
+  });
+});
+
+describe("lease timing", () => {
+  it("times the lease from the moment it is acquired, not from when the request started", async () => {
+    await createUser("u1", "Heat");
+    // First clock read = request start (T0). Every later read is 5s later, as if the queries
+    // before acquisition were slow.
+    let reads = 0;
+    const now = () => (reads++ === 0 ? T0 : at(5_000));
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    const generate = vi.fn(async () => {
+      await gate;
+      return "A Heat fact";
+    });
+    const { deps } = makeDeps({ now, generate });
+
+    const pending = getFactForUser("u1", deps);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1)); // lease is held now
+    const held = await db.user.findUniqueOrThrow({ where: { id: "u1" } });
+    finish();
+    await pending;
+
+    // LEASE_TTL_MS (20s) after acquisition (T0 + 5s), not after the request started (T0).
+    expect(held.factLockUntil?.toISOString()).toBe(at(25_000).toISOString());
   });
 });
 

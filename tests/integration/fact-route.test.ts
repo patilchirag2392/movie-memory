@@ -7,10 +7,13 @@ import { createFact, createUser, db, factCount, resetDatabase } from "../helpers
 // Tests the real GET /api/fact handler against the test DB. Only two things are replaced:
 // - `@/auth`: decides who the session belongs to (what Auth.js would read from the cookie),
 // - `generateMovieFact`: no network calls.
-const session = vi.hoisted(() => ({ userId: null as string | null }));
+const session = vi.hoisted(() => ({ userId: null as string | null, lookupFails: false }));
 
 vi.mock("@/auth", () => ({
-  auth: async () => (session.userId ? { user: { id: session.userId } } : null),
+  auth: async () => {
+    if (session.lookupFails) throw new Error("database unreachable"); // e.g. Postgres is down
+    return session.userId ? { user: { id: session.userId } } : null;
+  },
 }));
 
 vi.mock("next/server", async (importOriginal) => ({
@@ -24,6 +27,7 @@ vi.mock("@/lib/openai", async (importOriginal) => ({
 }));
 
 const { GET } = await import("@/app/api/fact/route");
+const { generateMovieFact } = await import("@/lib/openai");
 
 /**
  * The handler's signature takes no request at all, so it has no way to read a query string.
@@ -39,6 +43,7 @@ async function callRoute(query = "") {
 beforeEach(async () => {
   await resetDatabase();
   session.userId = null;
+  session.lookupFails = false;
 });
 
 afterAll(async () => {
@@ -66,7 +71,11 @@ describe("GET /api/fact authorization", () => {
     const { res, body } = await callRoute("?userId=bob");
 
     expect(res.status).toBe(200);
-    expect(body).toMatchObject({ fact: { movie: "Spirited Away" }, source: "generated" });
+    expect(body).toMatchObject({
+      fact: { movie: "Spirited Away" },
+      source: "generated",
+      nextFactInSeconds: 60,
+    });
     expect(JSON.stringify(body)).not.toContain("Bob's private fact");
     expect(await factCount("alice")).toBe(1); // created for Alice...
     expect(await factCount("bob")).toBe(1); // ...and Bob's facts are untouched
@@ -93,5 +102,42 @@ describe("GET /api/fact authorization", () => {
 
     expect(signedOut.res.headers.get("cache-control")).toBe("no-store");
     expect(signedIn.res.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("GET /api/fact unexpected errors", () => {
+  const friendly503 = {
+    error: {
+      code: "generation_failed",
+      message: "We couldn't come up with a fun fact right now. Please try again in a moment.",
+    },
+  };
+
+  it("turns a bug inside the fact logic into the standard 503 JSON, and logs it", async () => {
+    await createUser("alice", "Heat");
+    session.userId = "alice";
+    // Not a FactGenerationError, so the service rethrows it as a bug; the route must catch it.
+    vi.mocked(generateMovieFact).mockRejectedValueOnce(new TypeError("undefined is not a function"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { res, body } = await callRoute();
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(body).toEqual(friendly503);
+    expect(JSON.stringify(body)).not.toContain("undefined is not a function"); // no internals leak
+    expect(log).toHaveBeenCalledWith("[api/fact] unexpected error", expect.any(TypeError));
+  });
+
+  it("turns a failed session lookup (e.g. database down) into the standard 503 JSON", async () => {
+    session.lookupFails = true;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { res, body } = await callRoute();
+
+    expect(res.status).toBe(503);
+    expect(body).toEqual(friendly503);
+    expect(JSON.stringify(body)).not.toContain("database unreachable");
+    expect(log).toHaveBeenCalledWith("[api/fact] unexpected error", expect.any(Error));
   });
 });
