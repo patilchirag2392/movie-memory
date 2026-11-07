@@ -1,0 +1,97 @@
+// Prisma 7: the connection URL lives in prisma7.config.ts, not here.
+// The client is generated into lib/generated/prisma (gitignored, rebuilt on `npm install`).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// All DateTime columns are timestamptz: each value is an absolute instant, so nothing depends on
+// a DB session's time zone setting.
+
+model User {
+  id            String    @id @default(cuid())
+  // Google can omit name and photo; the UI must fall back gracefully, so both are nullable.
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime? @db.Timestamptz(3)
+  image         String?
+
+  // The user's one favorite movie. NULL means "not onboarded yet": this column is the single
+  // source of truth for the first-time-vs-returning redirect (no separate `onboarded` flag
+  // that could disagree with it).
+  favoriteMovie String?
+
+  // Fact-generation lease (burst protection). Acquired with one atomic conditional UPDATE,
+  // released only by the holder of the matching token. Both values come from the app clock.
+  factLockToken String?
+  factLockUntil DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  accounts Account[]
+  sessions Session[]
+  facts    Fact[]
+}
+
+model Fact {
+  id        String   @id @default(cuid())
+  userId    String
+  // Snapshot of the title this fact is about. Cache lookups and fallbacks filter on the user's
+  // CURRENT movie, so a fact about a previous movie is never served.
+  movie     String
+  content   String
+  // No @default(now()) on purpose: the service always passes the injected app-clock `now`, so
+  // one clock decides the 60s window. Without a default, Prisma's create type requires this
+  // field, so forgetting to set it is a compile error.
+  createdAt DateTime @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Matches the hot query exactly: newest fact for (userId, movie).
+  @@index([userId, movie, createdAt(sort: Desc)])
+}
+
+// ---- Auth.js Prisma adapter models (OAuth + database sessions) ----
+// VerificationToken (email magic links) and Authenticator (passkeys) are omitted: we only use
+// Google OAuth, and the adapter only touches those tables for those features.
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

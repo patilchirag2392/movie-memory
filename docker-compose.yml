@@ -1,0 +1,25 @@
+# Local Postgres for development AND tests.
+# Port 5433 (not 5432) so it never collides with a Postgres already running on the host.
+# One container, two databases: `movie_memory` (dev) and `movie_memory_test` (integration tests),
+# so test runs can wipe their DB without touching dev data.
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: movie
+      POSTGRES_PASSWORD: movie
+      POSTGRES_DB: movie_memory
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U movie -d movie_memory"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
