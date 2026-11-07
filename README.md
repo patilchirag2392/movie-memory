@@ -33,7 +33,7 @@ Built for a full-stack take-home exercise, with **Variant A: backend caching and
 - **The first visit after a quiet period takes a few extra seconds:** Railway's free plan puts the app to sleep when idle.
 - **How it's deployed:**
   - The service builds with Railway's default builder and starts with `npm start` on Node 22 (from `engines` in `package.json`).
-  - Before each deploy, Railway runs `npm run db:deploy` (its pre-deploy command), so migrations are applied inside Railway's private network.
+  - Before each deploy, Railway runs `npm run db:deploy:retry` (its pre-deploy command), so migrations are applied inside Railway's private network. It retries up to 6 times, 5 seconds apart. On the free plan the database sleeps when idle, and the first connection can arrive before it has woken (a deploy failed this way with `P1001`). It still exits with an error if the database never becomes reachable, so a broken migration stops the deploy.
   - A healthcheck on `/` must pass before traffic switches to a new deploy.
 - **Railway settings:** these live in the service settings, not in the repo. Railway has deprecated `railway.json` config files for new services.
 - **Environment variables:** the same as below, plus `AUTH_URL` set to the public URL (see [Production mode](#production-mode)). The demo uses its own `AUTH_SECRET`, and `DATABASE_URL` points at Railway's private database host.
