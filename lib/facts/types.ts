@@ -8,10 +8,16 @@ export type FactView = {
   createdAt: string;
 };
 
+/**
+ * - "generated": this request created the fact.
+ * - "cache": the fact is less than 60s old, or another concurrent request just created it.
+ * - "stale": OpenAI failed, so this is the user's most recent fact for this movie (any age).
+ */
+export type FactSource = "generated" | "cache" | "stale";
+
 export type FactSuccessBody = {
   fact: FactView;
-  /** Where this fact came from. Slice 6 adds "cache" and "stale". */
-  source: "generated";
+  source: FactSource;
 };
 
 export type FactErrorCode = "unauthenticated" | "not_onboarded" | "generation_failed";

@@ -9,7 +9,7 @@ import OpenAI from "openai";
  * Total time budget for one fact, across the whole OpenAI call.
  * The SDK's own `timeout` applies per attempt, and its default retries would multiply it.
  * Retries are therefore off (maxRetries: 0), and one AbortSignal bounds the entire call.
- * Slice 6 relies on this bound: the generation lease must outlive it.
+ * The generation lease relies on this bound (see lib/facts/timing.ts).
  */
 export const OPENAI_DEADLINE_MS = 10_000;
 

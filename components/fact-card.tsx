@@ -3,13 +3,20 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import type { FactResponseBody, FactView } from "@/lib/facts/types";
+import type { FactResponseBody, FactSource, FactView } from "@/lib/facts/types";
 
 type Settled =
-  | { status: "ready"; fact: FactView }
+  | { status: "ready"; fact: FactView; source: FactSource }
   | { status: "error"; message: string; signedOut: boolean };
 
 type State = Settled | { status: "loading"; previous?: FactView };
+
+// Explains why "Get another" can show the same fact: the server reuses a fact for 60 seconds,
+// and serves the last one when OpenAI is unavailable.
+const SOURCE_NOTE: Record<Exclude<FactSource, "generated">, string> = {
+  cache: "This fact is less than a minute old. You can get a new one after a minute.",
+  stale: "We couldn't get a new fact right now, so here's your most recent one.",
+};
 
 /**
  * Plain async function, no React state: calls the API and turns any outcome into the next UI
@@ -19,7 +26,7 @@ async function fetchFact(signal: AbortSignal): Promise<Settled> {
   try {
     const res = await fetch("/api/fact", { cache: "no-store", signal });
     const body = (await res.json()) as FactResponseBody;
-    if ("fact" in body) return { status: "ready", fact: body.fact };
+    if ("fact" in body) return { status: "ready", fact: body.fact, source: body.source };
     return { status: "error", message: body.error.message, signedOut: res.status === 401 };
   } catch (error) {
     if (!signal.aborted) console.error(error);
@@ -91,6 +98,10 @@ export function FactCard() {
           <div className="h-4 w-2/3 animate-pulse rounded bg-neutral-200 dark:bg-neutral-800" />
         </div>
       ) : null}
+
+      {state.status === "ready" && state.source !== "generated" && (
+        <p className="text-xs text-neutral-500">{SOURCE_NOTE[state.source]}</p>
+      )}
 
       {state.status === "error" && (
         <p role="alert" className="text-sm text-red-600">
