@@ -29,7 +29,7 @@ Built for a full-stack take-home exercise, with **Variant A: backend caching and
 
 **https://web-production-c2ef87.up.railway.app**, hosted on [Railway](https://railway.com): the app plus a Railway Postgres database.
 
-- **Who can sign in:** the Google consent screen is in Testing mode, so only Google accounts listed as test users can sign in. Others see Google's "access blocked" page.
+- **Who can sign in:** any Google account. The OAuth app is published ("In production"). It only requests `openid`, `email` and `profile`, which need no Google verification. The privacy policy Google requires is at [/privacy](https://web-production-c2ef87.up.railway.app/privacy). OpenAI spend is bounded by the 60-second cache (about one call per user per minute) and a monthly budget limit on the OpenAI account.
 - **The first visit after a quiet period takes a few extra seconds:** Railway's free plan puts the app to sleep when idle.
 - **How it's deployed:**
   - The service builds with Railway's default builder and starts with `npm start` on Node 22 (from `engines` in `package.json`).
