@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+
 import { signOutAction } from "@/lib/auth/actions";
 import { requireUser } from "@/lib/auth/require-user";
 
@@ -11,6 +13,9 @@ export const instant = false;
 // Slice 2 stub: proves the auth gate works. Slice 4 fills in the full dashboard.
 export default async function DashboardPage() {
   const user = await requireUser(); // redirects to / when signed out
+  // First-time vs returning is decided here, from the DB, after every sign-in (sign-in always
+  // lands on /dashboard). No favorite movie yet means not onboarded.
+  if (user.favoriteMovie === null) redirect("/onboarding");
 
   return (
     <main className="mx-auto w-full max-w-lg space-y-6 p-6">
