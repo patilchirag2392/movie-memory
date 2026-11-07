@@ -248,6 +248,7 @@ flowchart TD
 | `lib/auth/require-user.ts`, `lib/auth/actions.ts` | session → user id; sign-in/out actions |
 | `app/onboarding/*`, `lib/validation/movie.ts` | onboarding page, action, validation rules |
 | `app/dashboard/page.tsx`, `components/*` | dashboard, avatar, fact card |
+| `app/privacy/page.tsx` | privacy policy (Google requires one before the OAuth app can be published for any Google account) |
 | `app/api/fact/route.ts` | HTTP contract: 200/401/409/503, `no-store` |
 | `lib/facts/service.ts` | cache → lease → generate → fallback |
 | `lib/facts/repo.ts` | every fact query, all filtered by `userId` |

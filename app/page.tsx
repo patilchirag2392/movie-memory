@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { signInWithGoogle } from "@/lib/auth/actions";
@@ -29,6 +30,11 @@ export default async function Home() {
             Sign in with Google
           </button>
         </form>
+        <p className="text-xs text-neutral-500">
+          <Link href="/privacy" className="underline">
+            Privacy policy
+          </Link>
+        </p>
       </div>
     </main>
   );
